@@ -141,6 +141,23 @@ I've published a number of guides that might contain helpful information, most r
 - To add new abilities to nanochat, see [Guide: counting r in strawberry (and how to add abilities generally)](https://github.com/karpathy/nanochat/discussions/164).
 - [Oct 13 2025: original nanochat post](https://github.com/karpathy/nanochat/discussions/1) introducing nanochat, though now it contains some deprecated information and the model is a lot older (with worse results) than current master.
 
+## New to LLMs? Reading guide
+
+The source files on this branch contain extra beginner-oriented comments (look for the `BEGINNER'S PRIMER` blocks at the top of files and `Beginner note:` in docstrings). They assume basic Python and high-school math, and link to background material. A suggested reading order that follows the pipeline:
+
+1. [runs/speedrun.sh](runs/speedrun.sh): the whole pipeline end to end
+2. [nanochat/tokenizer.py](nanochat/tokenizer.py): text to token ids (BPE)
+3. [nanochat/gpt.py](nanochat/gpt.py): the Transformer model (embeddings, attention, MLP, loss)
+4. [nanochat/dataloader.py](nanochat/dataloader.py): how training batches are built
+5. [scripts/base_train.py](scripts/base_train.py): the pretraining loop (forward, backward, optimizer step)
+6. [nanochat/optim.py](nanochat/optim.py): how the weights get updated (AdamW, Muon)
+7. [nanochat/loss_eval.py](nanochat/loss_eval.py) and [nanochat/core_eval.py](nanochat/core_eval.py): measuring progress
+8. [scripts/chat_sft.py](scripts/chat_sft.py): turning a base model into a chat assistant
+9. [scripts/chat_rl.py](scripts/chat_rl.py): improving it with reinforcement learning
+10. [nanochat/engine.py](nanochat/engine.py) and [scripts/chat_cli.py](scripts/chat_cli.py): generating text and chatting
+
+Recommended background: Andrej Karpathy's [Neural Networks: Zero to Hero](https://karpathy.ai/zero-to-hero.html) video series and 3Blue1Brown's [Neural Networks](https://www.3blue1brown.com/topics/neural-networks) series.
+
 ## File structure
 
 ```

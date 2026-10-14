@@ -2,6 +2,10 @@
 Evaluate the Chat model on HumanEval dataset.
 Btw this dataset is a misnomer and has nothing to do with humans.
 It is a coding benchmark.
+
+Beginner note: each problem gives a Python function signature + docstring; the model must write
+the function body, which is then run against hidden unit tests (see nanochat/execution.py).
+Paper: https://arxiv.org/abs/2107.03374
 """
 
 import re

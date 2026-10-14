@@ -15,6 +15,11 @@ Examples:
 
     # Quick/approximate evaluation using a single GPU
     python -m scripts.base_eval --model-tag d24 --device-batch-size=16 --max-per-task=100 --split-tokens=524288
+
+Beginner note: this evaluates a base (pretrained, not yet fine-tuned) model in three ways:
+- CORE: accuracy on a suite of benchmark tasks (see nanochat/core_eval.py)
+- bpb: bits per byte, i.e. how well it predicts held-out text (see nanochat/loss_eval.py)
+- sample: just print some generated text so a human can eyeball it
 """
 import os
 import csv

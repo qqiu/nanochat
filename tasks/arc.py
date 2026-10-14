@@ -1,6 +1,9 @@
 """
 The ARC dataset from Allen AI.
 https://huggingface.co/datasets/allenai/ai2_arc
+
+Beginner note: ARC ("AI2 Reasoning Challenge") contains grade-school science multiple-choice
+questions, in an Easy and a Challenge set. Paper: https://arxiv.org/abs/1803.05457
 """
 
 from tasks.common import Task, load_hub_dataset, render_mc

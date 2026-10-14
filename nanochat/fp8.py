@@ -1,5 +1,10 @@
 """Minimal FP8 training for nanochat — tensorwise dynamic scaling only.
 
+Beginner note: this is an optional speed optimization (enabled with --fp8 in base_train.py, needs an
+H100-class GPU). It is safe to skip entirely when learning how LLMs work. FP8 = 8-bit floating point
+numbers: only 256 possible values, so each tensor is first multiplied by a "scale" to make good use
+of that small range. Intro to number formats: https://en.wikipedia.org/wiki/Minifloat
+
 Drop-in replacement for torchao's Float8Linear (~2000 lines) with ~150 lines.
 We only need the "tensorwise" recipe (one scalar scale per tensor), not the full
 generality of torchao (rowwise scaling, FSDP float8 all-gather, DTensor, tensor

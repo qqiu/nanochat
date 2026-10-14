@@ -16,6 +16,27 @@ Fallback to the original if you have very limited data AND long documents:
 https://github.com/karpathy/nanochat/blob/3c3a3d7/nanochat/dataloader.py#L78-L117
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: what does the dataloader do?
+# =============================================================================
+# The model is trained on fixed-size rectangles of tokens: B rows (batch size),
+# each exactly T tokens long (sequence length). But real documents have all
+# sorts of lengths. This file:
+#   1. reads raw text documents from parquet files on disk (see dataset.py),
+#   2. tokenizes them (text -> token ids), putting <|bos|> at the start of each,
+#   3. "packs" whole documents into each row like Tetris, cropping one if needed,
+#   4. returns (inputs, targets) where targets = inputs shifted by one token.
+#
+# Example with T=5, one row of tokens [BOS, The, cat, sat, on, mat]:
+#     inputs  = [BOS, The, cat, sat, on ]
+#     targets = [The, cat, sat, on,  mat]
+# so at every position the model is asked to predict the next token. That's
+# why each row is built with T+1 tokens ("row_capacity") and then split.
+#
+# Parquet is a compressed, column-based file format for tabular data:
+# https://parquet.apache.org/docs/overview/
+# =============================================================================
+
 import torch
 import pyarrow.parquet as pq
 
@@ -29,6 +50,11 @@ def _document_batches(split, resume_state_dict, tokenizer_batch_size):
     Handles DDP sharding and approximate resume. Each yield is (text_batch, (pq_idx, rg_idx, epoch))
     where text_batch is a list of document strings, indices track position for resumption,
     and epoch counts how many times we've cycled through the dataset (starts at 1).
+
+    Beginner note: this is a Python generator function (it uses `yield`), so it produces batches
+    lazily, one at a time, forever. With multiple GPUs ("DDP sharding"), GPU number `ddp_rank`
+    reads every world_size-th chunk, so each GPU sees different data. The last parquet file is
+    reserved as the validation split; all others are training data.
     """
     ddp, ddp_rank, ddp_local_rank, ddp_world_size = get_dist_info()
 
@@ -109,6 +135,8 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
             doc_buffer.append(tokens)
 
     # Pre-allocate buffers once: layout is [inputs (B*T) | targets (B*T)]
+    # ("HtoD" = Host to Device, i.e. copying from CPU memory to GPU memory. Fewer, bigger copies are faster.
+    # "pinned" memory is CPU memory the GPU can copy from directly, which makes the transfer faster.)
     # This gives us contiguous views and a single HtoD transfer
     use_cuda = device == "cuda"
     row_buffer = torch.empty((B, row_capacity), dtype=torch.long) # for building rows without creating Python lists
@@ -151,8 +179,8 @@ def tokenizing_distributed_data_loader_with_state_bos_bestfit(
                     pos += remaining
 
         # Copy to pinned CPU buffer, then single HtoD transfer
-        cpu_inputs.copy_(row_buffer[:, :-1])
-        cpu_targets.copy_(row_buffer[:, 1:])
+        cpu_inputs.copy_(row_buffer[:, :-1]) # inputs: all tokens except the last
+        cpu_targets.copy_(row_buffer[:, 1:]) # targets: all tokens except the first (= shifted by one)
 
         state_dict = {"pq_idx": pq_idx, "rg_idx": rg_idx, "epoch": epoch}
 

@@ -12,6 +12,11 @@ Working 50 minutes, she earned 0.2 x 50 = $<<0.2*50=10>>10.
 #### 10
 
 Notice that GSM8K uses tool calls inside << >> tags.
+
+Beginner note: GSM8K = "Grade School Math 8K", ~8,000 word problems. It's used in SFT to teach
+step-by-step reasoning and calculator use (the << >> parts are turned into <|python_start|> tool
+calls), and in RL (chat_rl.py), where the reward is simply whether the final number is right.
+Paper: https://arxiv.org/abs/2110.14168
 """
 
 import re

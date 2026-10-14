@@ -9,6 +9,42 @@ Adapted from: https://github.com/KellerJordan/modded-nanogpt
 Further contributions from @karpathy and @chrisjmccormick.
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: optimizers
+# =============================================================================
+# After loss.backward(), every parameter p has a gradient p.grad: the direction
+# in which changing p would INCREASE the loss the fastest. An optimizer decides
+# how to use these gradients to update the parameters.
+#
+# 1. Plain gradient descent (SGD):    p = p - lr * grad
+#    Like walking downhill in fog by feeling the slope under your feet.
+#
+# 2. Momentum: keep a running average of recent gradients and step along that
+#    instead. Like a ball rolling downhill: it smooths out noisy, zig-zagging
+#    gradients and builds up speed in consistent directions.
+#    https://distill.pub/2017/momentum/
+#
+# 3. Adam / AdamW: momentum + a per-parameter step size. It also tracks the
+#    running average of grad**2 (how big the gradients usually are), and divides
+#    by its square root, so every parameter moves by a similar amount regardless
+#    of how large its gradients are. AdamW additionally applies "weight decay"
+#    (shrinking weights slightly toward 0 each step). It's the default optimizer
+#    for most deep learning. https://arxiv.org/abs/1412.6980 (Adam paper)
+#
+# 4. Muon: a newer optimizer for 2D weight matrices (the big Linear layers).
+#    It takes the momentum update matrix and "orthogonalizes" it, which roughly
+#    means making the update push equally hard in every direction instead of
+#    being dominated by a few directions. This trains transformers noticeably
+#    faster. https://kellerjordan.github.io/posts/muon/
+#
+# Most of the code below is about speed: fusing the math into single compiled GPU
+# kernels and, with multiple GPUs, splitting the work and communication between
+# them. On a first read, focus on adamw_step_fused, which is a direct
+# implementation of the AdamW math; the Muon math is more advanced (linear algebra).
+# "lerp" = linear interpolation: a.lerp_(b, w) sets a = a + w * (b - a). It's how
+# running averages are updated here.
+# =============================================================================
+
 import torch
 import torch.distributed as dist
 from torch import Tensor
@@ -48,12 +84,17 @@ def adamw_step_fused(
     # Weight decay (decoupled, applied before the update)
     p32.mul_(1 - lr_t * wd_t)
     # Update running averages (lerp_ is cleaner and fuses well)
+    # exp_avg    ("first moment")  = running average of the gradient       -> momentum / direction
+    # exp_avg_sq ("second moment") = running average of the gradient**2    -> typical gradient size
     exp_avg32.lerp_(grad32, 1 - beta1_t)
     exp_avg_sq32.lerp_(grad32.square(), 1 - beta2_t)
     # Bias corrections
+    # (the running averages start at 0, so early on they are too small; dividing by (1 - beta**step)
+    # corrects for that. As step grows, beta**step -> 0 and the correction disappears.)
     bias1 = 1 - beta1_t ** step_t
     bias2 = 1 - beta2_t ** step_t
-    # Compute update and apply
+    # Compute update and apply:  p = p - lr * average_grad / sqrt(average_grad**2)
+    # (eps is a tiny number that prevents dividing by zero)
     denom = (exp_avg_sq32 / bias2).sqrt() + eps_t
     step_size = lr_t / bias1
     p32.add_(exp_avg32 / denom, alpha=-step_size)
@@ -127,6 +168,9 @@ def muon_step_fused(
     Some of the constants are 0-D CPU tensors to avoid recompilation when values change.
     """
 
+    # Beginner note: "stacked" means several same-shaped weight matrices (e.g. the MLP weights of all
+    # layers) are stacked into one 3D tensor so they can all be updated in a single GPU operation.
+
     # Nesterov momentum
     momentum = momentum_t.to(stacked_grads.dtype)
     momentum_buffer.lerp_(stacked_grads, 1 - momentum)
@@ -141,7 +185,10 @@ def muon_step_fused(
     X = X * (target / row_norm).to(X.dtype)
 
     # Polar Express orthogonalization: replace each update with the nearest orthogonal matrix
-    X = X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-6)
+    # (An orthogonal matrix rotates vectors without stretching them. The loop below is a cheap
+    # polynomial approximation, using only matrix multiplications, that converges toward it.
+    # Linear algebra background: https://www.3blue1brown.com/topics/linear-algebra)
+    X =X / (X.norm(dim=(-2, -1), keepdim=True) * 1.01 + 1e-6)
     if g.size(-2) > g.size(-1): # Tall matrix
         for a, b, c in polar_express_coeffs[:ns_steps]:
             A = X.mT @ X
@@ -174,6 +221,8 @@ def muon_step_fused(
     g = g * final_scale.to(g.dtype)
 
     # Cautious weight decay + parameter update
+    # ("cautious": only decay a weight when the update is already pushing it toward zero, i.e. when the
+    # update and the weight have the same sign)
     lr = lr_t.to(g.dtype)
     wd = wd_t.to(g.dtype)
     mask = (g * stacked_params) >= 0
@@ -205,6 +254,15 @@ class MuonAdamW(torch.optim.Optimizer):
     optimizer (nanochat does not use DDP) and optimizer states are sharded across ranks
     (ZeRO-2 style). On a single rank, all communication is skipped and the rank owns all
     parameters, so the sharded code paths degenerate to plain full-tensor updates.
+
+    Beginner note: everything from here on is about multi-GPU efficiency. Terms used:
+    - all_reduce: every GPU contributes a tensor; afterwards every GPU holds the sum/average.
+    - reduce_scatter: like all_reduce, but each GPU only receives its own 1/N slice of the result.
+    - all_gather: each GPU contributes its slice; afterwards every GPU holds the full tensor.
+    - async: start the communication and keep computing while it happens in the background.
+    - ZeRO: a technique to save memory by having each GPU store only part of the optimizer state.
+      https://www.microsoft.com/en-us/research/blog/zero-deepspeed-new-system-optimizations-enable-training-models-with-over-100-billion-parameters/
+    On a single GPU (or CPU), none of the communication happens.
 
     Design Goals:
     - Overlap communication with computation (async ops)

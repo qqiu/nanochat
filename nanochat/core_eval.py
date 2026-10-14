@@ -2,6 +2,14 @@
 Functions for evaluating the CORE metric, as described in the DCLM paper.
 https://arxiv.org/abs/2406.11794
 
+Beginner note: how do you test a base model that can only continue text? Turn every question into
+text continuations and check which one the model finds most likely. E.g. for a multiple-choice
+question with choices A/B/C/D, we build 4 prompts "question + answer A", "question + answer B", ...
+and compute the model's loss on the answer part of each. The answer with the lowest loss (= highest
+probability) is the model's pick. "Few-shot" means we first show a few solved examples in the prompt
+so the model understands the format. CORE averages the accuracy over ~22 such tasks, "centered" so
+that random guessing scores 0 and a perfect score is 1.
+
 TODOs:
 - All tasks ~match except for squad. We get 31% reference is 37%. Figure out why.
 """

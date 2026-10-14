@@ -11,6 +11,36 @@ Notes:
 The whole thing is made as efficient as possible.
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: inference
+# =============================================================================
+# "Inference" = using a trained model to produce output (as opposed to training it).
+# For a language model, generating text works like this:
+#
+#   prompt tokens -> model -> probabilities for the next token -> pick one ->
+#   append it to the sequence -> run the model again -> ... until a stop token.
+#
+# This file makes that loop fast, with two main ideas:
+#
+# 1. KV cache. In attention (see gpt.py), every token computes a key and a value.
+#    The keys/values of OLD tokens never change, so instead of recomputing them
+#    for the whole sequence each time we add one token, we store ("cache") them
+#    and only compute the new token's key/value. This turns each step from
+#    "process the whole text again" into "process just one token".
+#    Visual explanation: https://huggingface.co/blog/not-lain/kv-caching
+#
+# 2. Prefill vs decode. Processing the prompt ("prefill") can be done for all
+#    prompt tokens at once in parallel. Generating ("decode") must be done one
+#    token at a time. We prefill once, then copy the cache for each of the
+#    num_samples parallel answers we want to generate.
+#
+# It also implements simple TOOL USE: the model can write
+#   <|python_start|> 12*34 <|python_end|>
+# and the engine will evaluate the expression with a tiny "calculator" and
+# inject <|output_start|> 408 <|output_end|> back into the token stream, so the
+# model can use the result. This is how chat models use tools, in miniature.
+# =============================================================================
+
 import torch
 import torch.nn.functional as F
 import signal
@@ -22,6 +52,9 @@ from nanochat.checkpoint_manager import load_model
 
 # -----------------------------------------------------------------------------
 # Calculator tool helpers
+# eval() runs a string as Python code, which is dangerous with untrusted input (the model's output
+# is untrusted!). So we restrict which characters are allowed, block dangerous names, remove all
+# builtins, and kill the evaluation if it takes more than a few seconds. Still not a real sandbox.
 @contextmanager
 def timeout(duration, formula):
     def timeout_handler(signum, frame):
@@ -87,6 +120,10 @@ class KVCache:
     - Tensors are (B, T, H, D) not (B, H, T, D)
     - FA3 updates the cache in-place during flash_attn_with_kvcache
     - Position tracked per batch element via cache_seqlens tensor
+
+    Beginner note: think of this as a big pre-allocated notebook. For every layer, and every
+    token generated so far, it stores that token's key and value vectors (see the attention
+    explanation in gpt.py). cache_seqlens records how many tokens have been written so far.
     """
 
     def __init__(self, batch_size, num_heads, seq_len, head_dim, num_layers, device, dtype):
@@ -139,7 +176,17 @@ class KVCache:
 # -----------------------------------------------------------------------------
 @torch.inference_mode()
 def sample_next_token(logits, rng, temperature=1.0, top_k=None):
-    """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1)."""
+    """Sample a single next token from given logits of shape (B, vocab_size). Returns (B, 1).
+
+    Beginner note on the knobs:
+    - temperature: logits are divided by it before softmax. 0 = always pick the most likely
+      token (deterministic, "greedy"); 1 = sample from the model's true distribution;
+      higher = more random. Try different values in chat_cli.py to get a feel for it.
+    - top_k: only consider the k most likely tokens, so that very unlikely (often nonsense)
+      tokens can never be picked.
+    - rng: a seeded random number generator, so results are reproducible.
+    More: https://huggingface.co/blog/how-to-generate
+    """
     assert temperature >= 0.0, "temperature must be non-negative"
     if temperature == 0.0:
         return torch.argmax(logits, dim=-1, keepdim=True)
@@ -174,7 +221,13 @@ class Engine:
 
     @torch.inference_mode()
     def generate(self, tokens, num_samples=1, max_tokens=None, temperature=1.0, top_k=None, seed=42):
-        """Same as generate, but does single prefill and then clones the KV cache."""
+        """Same as generate, but does single prefill and then clones the KV cache.
+
+        Generates num_samples independent continuations of the prompt `tokens` in parallel (as a
+        batch). Each loop iteration yields one "column": the next token for every sample, plus a
+        mask saying whether the token was sampled by the model (1) or forced in by the calculator
+        tool (0).
+        """
         assert isinstance(tokens, list) and isinstance(tokens[0], int), "expecting list of ints"
         device = self.model.get_device()
         # Allocate the KV cache in the compute dtype so it matches what the forward pass emits
@@ -248,7 +301,8 @@ class Engine:
                 # On <|assistant_end|> or <|bos|>, mark the row as completed
                 if next_token == assistant_end or next_token == bos:
                     state.completed = True
-                # Handle tool logic
+                # Handle tool logic (a small "state machine": we track whether we are currently
+                # between <|python_start|> and <|python_end|>, collecting the expression tokens)
                 if next_token == python_start:
                     state.in_python_block = True
                     state.python_expr_tokens = []
@@ -271,7 +325,8 @@ class Engine:
             num_generated += 1
 
             # Prepare logits for next iteration
-            ids = torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
+            # Thanks to the KV cache, we only feed in the ONE new token per row, not the whole sequence.
+            ids =torch.tensor(token_column, dtype=torch.long, device=device).unsqueeze(1)
             logits = self.model.forward(ids, kv_cache=kv_cache_decode)[:, -1, :]  # (B, vocab_size)
 
     def generate_batch(self, tokens, num_samples=1, **kwargs):

@@ -12,6 +12,13 @@ Usage (drop-in replacement for FA3):
 
     # Inference (with KV cache)
     y = flash_attn.flash_attn_with_kvcache(q, k_cache, v_cache, k=k, v=v, ...)
+
+Beginner note: both backends compute the exact same math, softmax(Q @ K^T / sqrt(d)) @ V (see the
+attention explanation in gpt.py). Flash Attention is a clever way of computing it on the GPU
+without ever building the full (T x T) table of attention scores in slow GPU memory, which makes it
+much faster. FA3 only works on recent NVIDIA GPUs, so on everything else we use PyTorch's built-in
+SDPA ("scaled dot product attention"). You don't need to understand this file to understand the model.
+FlashAttention paper: https://arxiv.org/abs/2205.14135
 """
 import torch
 import torch.nn.functional as F

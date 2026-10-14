@@ -10,6 +10,9 @@ import torch
 import torch.distributed as dist
 from filelock import FileLock
 
+# Beginner note: "dtype" = how each number is stored. float32 uses 32 bits (precise), bfloat16 and
+# float16 use 16 bits (half the memory, much faster on modern GPUs, less precise). Neural networks
+# turn out to tolerate low precision surprisingly well. "SM" below is NVIDIA's GPU generation number.
 # The dtype used for compute (matmuls, activations). Master weights stay fp32 for optimizer precision.
 # Linear layers cast their weights to this dtype in forward, replacing torch.amp.autocast.
 # Override with NANOCHAT_DTYPE env var: "bfloat16", "float16", "float32"
@@ -115,6 +118,7 @@ def download_file_with_lock(url, filename, postprocess_fn=None):
 
     return file_path
 
+# print only on rank 0, so that with 8 GPUs (8 copies of the script) messages aren't printed 8 times
 def print0(s="",**kwargs):
     ddp_rank = int(os.environ.get('RANK', 0))
     if ddp_rank == 0:
@@ -162,6 +166,7 @@ def get_dist_info():
 
 def autodetect_device_type():
     # prefer to use CUDA if available, otherwise use MPS, otherwise fallback on CPU
+    # (CUDA = NVIDIA GPUs, MPS = "Metal Performance Shaders", the GPU of Apple Silicon Macs)
     if torch.cuda.is_available():
         device_type = "cuda"
     elif torch.backends.mps.is_available():
@@ -181,6 +186,8 @@ def compute_init(device_type="cuda"): # cuda|cpu|mps
         assert torch.backends.mps.is_available(), "Your PyTorch installation is not configured for MPS but device_type is 'mps'"
 
     # Reproducibility
+    # (A "seed" makes the random number generator produce the same sequence every run, so results
+    # such as the random initial weights are repeatable.)
     # Note that we set the global seeds here, but most of the code uses explicit rng objects.
     # The only place where global rng might be used is nn.Module initialization of the model weights.
     torch.manual_seed(42)

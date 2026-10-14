@@ -1,6 +1,11 @@
 """
 Train a tokenizer using our own BPE Tokenizer library.
 In the style of GPT-4 tokenizer.
+
+Beginner note: this is the first step of the pipeline. It reads ~2 billion characters of web text
+and runs the BPE algorithm (explained at the top of nanochat/tokenizer.py) to learn a vocabulary of
+32,768 tokens. The result is saved to disk and used by every later stage. The tokenizer is trained
+once and then frozen: the model is trained on top of it and the two must always be used together.
 """
 import os
 import time

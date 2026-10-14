@@ -1,5 +1,15 @@
 """
 Utilities for saving and loading model/optim/state checkpoints.
+
+Beginner note: a "checkpoint" is a snapshot of a model saved to disk. A model is really just a big
+dictionary mapping parameter names (like "transformer.h.0.attn.c_q.weight") to tensors of numbers,
+which PyTorch calls the "state_dict". Each checkpoint here consists of:
+- model_XXXXXX.pt:          the model weights (the state_dict) at training step XXXXXX
+- meta_XXXXXX.json:         human-readable info: model config, training settings, metrics
+- optim_XXXXXX_rankN.pt:    the optimizer's internal state (momentum etc.), only needed to resume training
+Checkpoints live under ~/.cache/nanochat/ in folders base_checkpoints/, chatsft_checkpoints/, etc.,
+one per training stage. Each stage loads the checkpoint of the previous stage.
+Background: https://pytorch.org/tutorials/beginner/saving_loading_models.html
 """
 import os
 import re

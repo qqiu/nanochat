@@ -11,6 +11,49 @@ If you are only on CPU/Macbook, you'll want to train a much much smaller LLM. Ex
 python -m scripts.base_train --depth=4 --max-seq-len=512 --device-batch-size=1 --eval-tokens=512 --core-metric-every=-1 --total-batch-size=512 --num-iterations=20
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: pretraining
+# =============================================================================
+# This script does "pretraining": teaching a freshly initialized (random) model
+# to predict the next token on a huge pile of web text. It is by far the most
+# expensive stage. After it, we have a "base model" that can continue text but
+# doesn't yet know how to behave like a chat assistant (that comes in chat_sft.py).
+#
+# The heart of it is the classic training loop (search for "single training step"):
+#
+#     for step in range(num_iterations):
+#         x, y = next(train_loader)    # x = input tokens, y = same tokens shifted by one
+#         loss = model(x, y)           # forward pass: how wrong are the predictions?
+#         loss.backward()              # backward pass: compute the gradient of the loss
+#                                      #   with respect to every weight ("which way to nudge")
+#         optimizer.step()             # nudge every weight a little bit downhill
+#         model.zero_grad()            # reset gradients for the next step
+#
+# The "gradient" is just the slope from high-school calculus, generalized to
+# millions of variables: for each weight, d(loss)/d(weight) tells us whether
+# increasing that weight would make the loss go up or down. PyTorch computes
+# all of these automatically ("autograd") when we call loss.backward().
+# Background:
+#   - 3Blue1Brown, gradient descent: https://www.youtube.com/watch?v=IHZwWFHWa-w
+#   - 3Blue1Brown, backpropagation: https://www.youtube.com/watch?v=Ilg3gGewQ5U
+#   - Karpathy, micrograd (build autograd from scratch): https://www.youtube.com/watch?v=VMj-3S1tku0
+#
+# Everything else in this file is "plumbing" around that loop:
+#   - choosing the model size from --depth, and the batch size / learning rate /
+#     number of steps from "scaling laws" (rules of thumb measured from experiments),
+#   - running on several GPUs at once (torchrun / DDP),
+#   - periodically evaluating, printing sample generations, and saving checkpoints,
+#   - logging to wandb (https://wandb.ai, a website that plots your training curves).
+#
+# Glossary used below:
+#   - step / iteration: one optimizer update.
+#   - batch: the group of examples processed in one step. Here measured in TOKENS.
+#   - learning rate (lr): the size of each nudge. Too big = unstable, too small = slow.
+#   - epoch: one full pass over the dataset (LLM pretraining usually does < 1 epoch).
+#   - rank: the index of a GPU/process when training on several GPUs.
+#   - val / validation: held-out data the model never trains on, used to measure progress honestly.
+# =============================================================================
+
 import os
 os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 import gc
@@ -38,6 +81,10 @@ print_banner()
 
 # -----------------------------------------------------------------------------
 # CLI arguments
+# argparse turns command line flags like --depth=12 into args.depth == 12.
+# Note: dashes in flag names become underscores in Python (--device-batch-size -> args.device_batch_size).
+# Most knobs here are "hyperparameters": settings chosen by humans, as opposed to "parameters"
+# (weights) which are learned. The single most important one is --depth.
 parser = argparse.ArgumentParser(description="Pretrain base model")
 # Logging
 parser.add_argument("--run", type=str, default="dummy", help="wandb run name ('dummy' disables wandb logging)")
@@ -82,6 +129,12 @@ user_config = vars(args).copy()  # for logging
 # -----------------------------------------------------------------------------
 # Compute init and wandb logging
 
+# Distributed training: when launched with torchrun on N GPUs, N copies of this script run at the
+# same time, one per GPU ("rank"). Each processes different data, and their gradients are averaged
+# (here inside the optimizer, see optim.py) so all copies of the model stay identical. The variable
+# is named `ddp` after PyTorch's DistributedDataParallel, the standard way of doing this.
+# With a single GPU / CPU, ddp is False and world_size is 1.
+# Background: https://pytorch.org/tutorials/beginner/ddp_series_theory.html
 device_type = autodetect_device_type() if args.device_type == "" else args.device_type
 ddp, ddp_rank, ddp_local_rank, ddp_world_size, device = compute_init(device_type)
 master_process = ddp_rank == 0 # this process will do logging, checkpointing etc.
@@ -93,6 +146,7 @@ if device_type == "cuda":
     print0(f"GPU: {gpu_device_name} | Peak FLOPS (BF16): {gpu_peak_flops:.2e}")
 else:
     gpu_peak_flops = float('inf')  # MFU not meaningful for CPU/MPS
+# (MFU = "Model FLOPs Utilization": what % of the GPU's theoretical max speed we actually achieve.)
 print0(f"COMPUTE_DTYPE: {COMPUTE_DTYPE} ({COMPUTE_DTYPE_REASON})")
 
 # wandb logging init
@@ -127,7 +181,11 @@ print0(f"Vocab size: {vocab_size:,}")
 # Initialize the Model
 
 def build_model_meta(depth):
-    """Build a model on meta device for a given depth (shapes/dtypes only, no data)."""
+    """Build a model on meta device for a given depth (shapes/dtypes only, no data).
+
+    This is where the "one dial" design happens: given only depth (number of layers), the width
+    is depth * aspect_ratio (e.g. depth 20 -> 1280 dims), and the number of heads follows from that.
+    """
     # Model dim is nudged up to nearest multiple of head_dim for clean division
     # (FA3 requires head_dim divisible by 8, and this guarantees head_dim == args.head_dim exactly)
     base_dim = depth * args.aspect_ratio
@@ -163,6 +221,8 @@ if resuming:
 
 # -----------------------------------------------------------------------------
 # FP8 training initialization and management (this has to be done before torch.compile)
+# (FP8 = 8-bit floating point numbers. Newer GPUs like H100 can multiply them ~2x faster than bf16,
+# at the cost of precision. Optional speed trick, off by default; safe to skip on a first read.)
 
 # Convert Linear layers to Float8Linear if --fp8 is set
 if args.fp8:
@@ -241,12 +301,23 @@ def disable_fp8(model):
 
 # -----------------------------------------------------------------------------
 # Compile the model
+# torch.compile analyzes the model's Python code and generates optimized GPU code for it,
+# typically making training noticeably faster. https://pytorch.org/tutorials/intermediate/torch_compile_tutorial.html
 
 orig_model = model # original, uncompiled model, for saving raw model state_dict and for inference/evaluation (because the shapes may change shape)
 model = torch.compile(model, dynamic=False) # the inputs to model will never change shape so dynamic=False is safe
 
 # -----------------------------------------------------------------------------
 # Scaling laws and muP extrapolations to determine the optimal training horizon, batch size, learning rates, weight decay.
+#
+# Beginner note: "scaling laws" are empirical rules (found by training many models of different
+# sizes and fitting curves) that predict how loss improves with model size and data. A famous one
+# from the Chinchilla paper: for a fixed compute budget, train on roughly ~20 tokens per parameter.
+# nanochat uses its own measured ratio (--target-param-data-ratio). The idea: tune hyperparameters
+# carefully on a small reference model (d12) and use formulas to transfer them to bigger models.
+# Chinchilla paper ("Training Compute-Optimal Large Language Models"): https://arxiv.org/abs/2203.15556
+# muP ("maximal update parametrization"), the idea of transferring hyperparameters across model
+# sizes: https://arxiv.org/abs/2203.03466
 
 # Get the parameter counts of our model
 param_counts = model.num_scaling_params()
@@ -294,6 +365,8 @@ if batch_ratio != 1.0:
     print0(f"Scaling LRs by {batch_lr_scale:.4f} for batch size {total_batch_size:,} (reference: {B_REF:,})")
 
 # 4) Knowing the batch size and the token horizon, we can now calculate the appropriate weight decay scaling
+# (Weight decay = each step, shrink every weight slightly toward zero. It acts as a gentle pressure
+# to keep weights small, which tends to help the model generalize. λ is the shrink strength.)
 # We adopt the T_epoch framework from https://arxiv.org/abs/2405.13698
 # Central idea of the paper is that T_epoch = B/(η·λ·D) should remain constant.
 # Above, we used learning rate scaling η ∝ √(B/B_ref). So it's a matter of ~10 lines of math to derive that to keep T_epoch constant, we need:
@@ -321,12 +394,17 @@ if resuming:
 
 # -----------------------------------------------------------------------------
 # GradScaler for fp16 training (bf16/fp32 don't need it — bf16 has the same exponent range as fp32)
+# (fp16 can't represent very tiny numbers, so tiny gradients would round to 0. GradScaler multiplies
+# the loss by a big factor before backward, then divides the gradients back down before the update.)
 scaler = torch.amp.GradScaler() if COMPUTE_DTYPE == torch.float16 else None
 if scaler is not None:
     print0("GradScaler enabled for fp16 training")
 
 # -----------------------------------------------------------------------------
 # Initialize the DataLoaders for train/val
+# Each call to next(train_loader) returns a fresh batch: x (inputs) and y (targets), both of shape
+# (device_batch_size, max_seq_len). y is x shifted by one token, i.e. y[b, t] is the token after x[b, t].
+# See nanochat/dataloader.py.
 dataloader_resume_state_dict = None if not resuming else meta_data["dataloader_state_dict"]
 train_loader = tokenizing_distributed_data_loader_with_state_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="train", device=device, resume_state_dict=dataloader_resume_state_dict)
 build_val_loader = lambda: tokenizing_distributed_data_loader_bos_bestfit(tokenizer, args.device_batch_size, args.max_seq_len, split="val", device=device)
@@ -357,6 +435,18 @@ print0(f"Tokens : Scaling params ratio: {total_batch_size * num_iterations / num
 print0(f"Total training FLOPs estimate: {num_flops_per_token * total_tokens:e}")
 
 # Learning rate schedule (linear warmup, constant, linear warmdown)
+# The learning rate isn't constant over training. Its shape over time looks like:
+#
+#   lr ^      ______________
+#      |     /              \
+#      |    /                \___
+#      +---------------------------> step
+#       warmup   constant   warmdown
+#
+# Warmup: start gently while weights are random and gradients are chaotic.
+# Warmdown: take smaller and smaller steps at the end to settle into a good minimum
+# (like slowing down as you approach the bottom of a valley).
+# More: https://www.jeremyjordan.me/nn-learning-rate/
 def get_lr_multiplier(it):
     warmup_iters = args.warmup_steps
     warmdown_iters = round(args.warmdown_ratio * num_iterations)
@@ -404,6 +494,9 @@ else:
     total_training_time = loop_state["total_training_time"]
 
 # Figure out the needed gradient accumulation micro-steps to reach the desired total batch size per step
+# Gradient accumulation: if the desired batch is too big to fit in GPU memory at once, we split it into
+# several smaller "micro-batches", run forward+backward on each, and let the gradients add up before
+# making a single optimizer step. Mathematically it's (almost) the same as one big batch.
 tokens_per_fwdbwd = args.device_batch_size * args.max_seq_len # tokens per iteration for a single rank
 world_tokens_per_fwdbwd = tokens_per_fwdbwd * ddp_world_size # total tokens per iteration for all ranks
 assert total_batch_size % world_tokens_per_fwdbwd == 0, f"total_batch_size ({total_batch_size}) must be a multiple of {world_tokens_per_fwdbwd}."
@@ -418,6 +511,8 @@ while True:
     flops_so_far = num_flops_per_token * total_batch_size * step
 
     # once in a while: evaluate the val bpb (all ranks participate)
+    # (bpb = "bits per byte", a loss measure that doesn't depend on the tokenizer, lower is better.
+    # See nanochat/loss_eval.py. model.eval()/model.train() switch the model between modes.)
     if args.eval_every > 0 and (last_step or step % args.eval_every == 0):
         model.eval()
         val_loader = build_val_loader()
@@ -436,6 +531,7 @@ while True:
         model.train()
 
     # once in a while: estimate the CORE metric (all ranks participate)
+    # (CORE = an average score over a suite of benchmark tasks; see nanochat/core_eval.py)
     # use the original uncompiled model because the inputs keep changing shape
     # disable FP8 for evaluation to use BF16 for more consistent/accurate results
     results = {}
@@ -473,6 +569,8 @@ while True:
             print0(tokenizer.decode(sample[0]))
         model.train()
 
+    # (A checkpoint is a saved snapshot of all the model weights + optimizer state on disk,
+    # so we can load the model later for chatting/eval, or resume training after a crash.)
     # save checkpoint: at the end of the run, or every save_every steps, except at the first step or the resume step
     if last_step or (step > 0 and step != args.resume_from_step and args.save_every > 0 and step % args.save_every == 0):
         save_checkpoint(
@@ -508,13 +606,13 @@ while True:
     synchronize()
     t0 = time.time()
     for micro_step in range(grad_accum_steps):
-        loss = model(x, y)
+        loss = model(x, y) # forward pass: calls GPT.forward, returns the average cross-entropy loss
         train_loss = loss.detach() # for logging
         loss = loss / grad_accum_steps # each .backward() is a grad sum => normalize loss here
         if scaler is not None:
             scaler.scale(loss).backward()
         else:
-            loss.backward()
+            loss.backward() # backward pass: fills in p.grad for every parameter p (gradients ADD UP across micro-steps)
         x, y, dataloader_state_dict = next(train_loader) # prefetch the next batch while the GPU is busy with forward/backward
     # step the optimizer
     lrm = get_lr_multiplier(step)
@@ -536,8 +634,8 @@ while True:
         scaler.step(optimizer)
         scaler.update()
     else:
-        optimizer.step()
-    model.zero_grad(set_to_none=True)
+        optimizer.step() # update every weight using its gradient
+    model.zero_grad(set_to_none=True) # clear the gradients, otherwise they'd keep adding up into the next step
     train_loss_f = train_loss.item() # .item() is a CPU-GPU sync point
     synchronize()
     t1 = time.time()
@@ -545,6 +643,8 @@ while True:
     # -------------------------------------------------------------------------
 
     # logging (CPU action only)
+    # EMA = exponential moving average: smooth = 0.9 * smooth + 0.1 * new. The loss of individual
+    # steps is noisy, so we print a smoothed version. https://en.wikipedia.org/wiki/Exponential_smoothing
     ema_beta = 0.9 # EMA decay factor for some smoothing just for nicer logging
     smooth_train_loss = ema_beta * smooth_train_loss + (1 - ema_beta) * train_loss_f # EMA the training loss
     debiased_smooth_loss = smooth_train_loss / (1 - ema_beta**(step + 1)) # debias the EMA

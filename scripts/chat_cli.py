@@ -3,6 +3,15 @@ New and upgraded chat mode because a lot of the code has changed since the last 
 
 Intended to be run single GPU only atm:
 python -m scripts.chat_cli
+
+Beginner note: this is the simplest "chatbot" possible, and it shows that a chat model is just
+next-token prediction plus bookkeeping. We keep the ENTIRE conversation as one growing list of
+token ids:
+    <|bos|> <|user_start|> hi <|user_end|> <|assistant_start|> hello! <|assistant_end|> <|user_start|> ...
+Each time you type a message, we append your tokens plus <|assistant_start|>, and let the model
+generate tokens until it produces <|assistant_end|>. The model has no memory between turns; it
+"remembers" the conversation only because we feed the whole thing back in every time.
+Try changing --temperature (e.g. 0.0 vs 1.2) to see how it changes the answers.
 """
 import argparse
 import torch

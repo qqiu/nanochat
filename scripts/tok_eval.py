@@ -1,5 +1,9 @@
 """
 Evaluate compression ratio of the tokenizer.
+
+Beginner note: a tokenizer's "compression ratio" = bytes of text / number of tokens. Higher means
+each token covers more text, so the model can fit more text into its context and needs fewer steps.
+This script compares our tokenizer with the GPT-2 and GPT-4 tokenizers on several kinds of text.
 """
 
 from nanochat.tokenizer import get_tokenizer, RustBPETokenizer

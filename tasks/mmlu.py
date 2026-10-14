@@ -1,6 +1,10 @@
 """
 The MMLU dataset.
 https://huggingface.co/datasets/cais/mmlu
+
+Beginner note: MMLU ("Massive Multitask Language Understanding") is a set of ~16K multiple-choice
+questions on 57 subjects (history, law, physics, ...), a classic test of an LLM's general knowledge.
+Paper: https://arxiv.org/abs/2009.03300
 """
 
 from tasks.common import Task, load_hub_dataset, render_mc

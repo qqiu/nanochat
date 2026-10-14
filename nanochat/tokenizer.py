@@ -2,10 +2,44 @@
 BPE Tokenizer in the style of GPT-4: train with rustbpe, inference with tiktoken.
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: what is a tokenizer?
+# =============================================================================
+# Neural networks only understand numbers. A tokenizer converts text into a list
+# of integers ("token ids") and back:
+#
+#     "Hello world!"  --encode-->  [15496, 995, 0]  --decode-->  "Hello world!"
+#
+# Why not just use one id per character? Sequences would be very long (and the
+# model's cost grows with sequence length). Why not one id per word? There are
+# too many words (plus typos, names, code, emoji...). Tokenizers sit in between:
+# common words become a single token, rare words are split into pieces, e.g.
+# "unbelievably" -> ["un", "believ", "ably"].
+#
+# BPE (Byte Pair Encoding) is the algorithm that learns these pieces:
+#   1. Start with the 256 possible byte values as the initial vocabulary
+#      (text is first converted to UTF-8 bytes, so ANY text can be represented).
+#   2. Count which pair of adjacent tokens appears most often in the training text.
+#   3. "Merge" that pair into a brand new token, and repeat until the vocabulary
+#      reaches the desired size (here 32,768 tokens).
+#
+# Background:
+#   - Karpathy "Let's build the GPT Tokenizer": https://www.youtube.com/watch?v=zduSFxRajkE
+#   - Karpathy's minbpe (small readable BPE code): https://github.com/karpathy/minbpe
+#   - Try a tokenizer interactively: https://tiktokenizer.vercel.app/
+#
+# Here, training the BPE is done by "rustbpe" (fast, written in Rust) and
+# encoding/decoding at runtime is done by OpenAI's "tiktoken" library (also fast).
+# =============================================================================
+
 import os
 import copy
 from functools import lru_cache
 
+# Special tokens are reserved ids that never appear in normal text. They act like
+# punctuation for the model: marking where a document starts, or who is speaking
+# in a conversation. After fine-tuning, the model learns e.g. that after
+# <|assistant_start|> it should write a reply, and end it with <|assistant_end|>.
 SPECIAL_TOKENS = [
     # every document begins with the Beginning of Sequence (BOS) token that delimits documents
     "<|bos|>",
@@ -20,6 +54,11 @@ SPECIAL_TOKENS = [
     "<|output_end|>",
 ]
 
+# Before BPE runs, text is pre-split into chunks with this regular expression
+# (regex, https://docs.python.org/3/howto/regex.html) and merges never cross a
+# chunk boundary. This keeps e.g. "dog." from becoming one token: words,
+# numbers, punctuation and whitespace get split apart first.
+# \p{L} = any letter, \p{N} = any digit, \s = whitespace.
 # NOTE: this split pattern deviates from GPT-4 in that we use \p{N}{1,2} instead of \p{N}{1,3}
 # I did this because I didn't want to "waste" too many tokens on numbers for smaller vocab sizes.
 # I verified that 2 is the sweet spot for vocab size of 32K. 1 is a bit worse, 3 was worse still.
@@ -143,6 +182,13 @@ class RustBPETokenizer:
         Returns:
         - ids: list[int] is a list of token ids of this rendered conversation
         - mask: list[int] of same length, mask = 1 for tokens that the Assistant is expected to train on.
+
+        Beginner note: a conversation like
+            [{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hello!"}]
+        becomes the token sequence
+            <|bos|> <|user_start|> Hi <|user_end|> <|assistant_start|> Hello! <|assistant_end|>
+        The mask marks which tokens the model is trained to PREDICT: only the assistant's words
+        (mask=1). We don't want the model learning to imitate the user, so those tokens get mask=0.
         """
         # ids, masks that we will return and a helper function to help build them up.
         ids, mask = [], []
@@ -268,6 +314,8 @@ def get_tokenizer():
     return RustBPETokenizer.from_directory(tokenizer_dir)
 
 def get_token_bytes(device="cpu"):
+    # Returns a tensor with the number of UTF-8 bytes of every token in the vocab. Used to compute
+    # the "bits per byte" metric (see loss_eval.py), which doesn't depend on the tokenizer.
     import torch
     from nanochat.common import get_base_dir
     base_dir = get_base_dir()

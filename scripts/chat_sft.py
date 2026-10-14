@@ -9,6 +9,33 @@ Or torchrun for training:
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: supervised fine-tuning (SFT)
+# =============================================================================
+# After pretraining (base_train.py), the "base model" is a document completer:
+# give it "The capital of France is" and it continues the text. But ask it a
+# question and it might reply with more questions, because that's what web
+# pages look like. SFT teaches it to be an ASSISTANT.
+#
+# How? We continue training the same model with the same next-token-prediction
+# loss, but now on example conversations between a user and a helpful assistant,
+# rendered with special tokens (see tokenizer.render_conversation):
+#
+#   <|bos|><|user_start|>What is 2+2?<|user_end|><|assistant_start|>4<|assistant_end|>
+#
+# Two key differences from pretraining:
+#   1. The data: conversations (SmolTalk), multiple-choice questions (MMLU) and
+#      math word problems with calculator tool use (GSM8K). See the tasks/ folder.
+#   2. The loss mask: we only train on the assistant's tokens. User tokens get
+#      target -1, which tells cross_entropy to ignore them (ignore_index=-1).
+#
+# SFT is MUCH cheaper than pretraining (far less data). The model's knowledge
+# comes mostly from pretraining; SFT mainly teaches the format and behavior.
+# Background:
+#   - InstructGPT paper (SFT + RLHF, the recipe behind ChatGPT): https://arxiv.org/abs/2203.02155
+#   - Hugging Face's chat templates explainer: https://huggingface.co/docs/transformers/main/en/chat_templating
+# =============================================================================
+
 import gc
 import argparse
 import os
@@ -91,6 +118,8 @@ if not HAS_FA3:
     print0("WARNING: Flash Attention 3 not available, using PyTorch SDPA fallback. Training will be less efficient.")
 
 # Load the model and tokenizer
+# Note: we start from the pretrained "base" checkpoint, NOT from random weights. This is the
+# essence of fine-tuning: reuse everything learned during pretraining and adjust it a little.
 model, tokenizer, meta = load_model("base", device, phase="train", model_tag=args.model_tag, step=args.model_step)
 
 # Inherit training hyperparameters from pretrained checkpoint (None = inherit, explicit value = override)
@@ -159,6 +188,8 @@ for group in optimizer.param_groups:
     group["initial_lr"] = group["lr"]
 
 # SFT data mixture and DataLoader
+# A "task" is a dataset of conversations (see tasks/). TaskMixture shuffles several tasks together.
+# Repeating a task several times (e.g. 3 epochs of MMLU) increases its weight in the mix.
 train_tasks = [
     SmolTalk(split="train"), # 460K rows of general conversations
     *[MMLU(subset="all", split="auxiliary_train") for _ in range(args.mmlu_epochs)], # 100K rows per epoch
@@ -185,6 +216,9 @@ def sft_data_generator_bos_bestfit(split, buffer_size=100):
     Conversations are packed using best-fit algorithm. When no conversation fits,
     the row is padded (instead of cropping) to ensure no tokens are ever discarded.
     Padding positions have targets masked with -1 (ignore_index for cross-entropy).
+
+    Beginner note: this is the SFT version of nanochat/dataloader.py. Read that file's primer first.
+    Here a "padding" token is just filler to make every row the same length; it is never trained on.
     """
     global last_step, approx_progress, current_epoch
     assert split in {"train", "val"}, "split must be 'train' or 'val'"

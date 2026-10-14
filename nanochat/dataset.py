@@ -5,6 +5,11 @@ This file contains utilities for:
 - download the files on demand if they are not on disk
 
 For details of how the dataset was prepared, see `repackage_data_reference.py`.
+
+Beginner note: the pretraining data is a huge collection of web text documents (ClimbMix, ~400B
+tokens in total), split into thousands of "shards" (files) of ~100MB each so you can download only
+as many as you need. Run `python -m nanochat.dataset -n 8` to download the first 8 shards.
+More on how pretraining datasets are built: https://huggingface.co/spaces/HuggingFaceFW/blogpost-fineweb-v1
 """
 
 import os

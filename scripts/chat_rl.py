@@ -16,6 +16,35 @@ python -m scripts.chat_rl
 torchrun --standalone --nproc_per_node=8 -m scripts.chat_rl -- --run=default
 """
 
+# =============================================================================
+# BEGINNER'S PRIMER: reinforcement learning (RL)
+# =============================================================================
+# In SFT, the model imitates example answers written by someone else. In RL,
+# the model learns from its OWN attempts, guided by a reward:
+#
+#   1. Take a math question from GSM8K (grade school math word problems).
+#   2. Let the model write num_samples different answers (with randomness,
+#      temperature > 0). These attempts are called "rollouts".
+#   3. Score each answer: reward = 1 if the final number is correct, else 0.
+#   4. "Advantage" = reward - average reward of the group. Answers better than
+#      average get a positive advantage, worse ones a negative advantage.
+#   5. Increase the probability of tokens in positive-advantage answers and
+#      decrease it for negative ones. Repeat.
+#
+# The math of step 5 (the "policy gradient", REINFORCE algorithm):
+#   objective = sum over generated tokens of  log(prob of token) * advantage
+# and we do gradient ASCENT on it (i.e. minimize loss = -objective).
+# Intuition: log(prob) goes up when we make that token more likely; multiplying
+# by the advantage decides whether we want that (advantage > 0) or not (< 0).
+#
+# Note there is no "correct answer text" to imitate here, only a score. That's
+# what lets RL improve beyond the examples it was shown.
+# Background:
+#   - Lilian Weng, "Policy Gradient Algorithms": https://lilianweng.github.io/posts/2018-04-08-policy-gradient/
+#   - OpenAI Spinning Up (gentle intro to RL): https://spinningup.openai.com/en/latest/spinningup/rl_intro.html
+#   - GRPO comes from the DeepSeekMath paper: https://arxiv.org/abs/2402.03300
+# =============================================================================
+
 import argparse
 import os
 import itertools
@@ -159,6 +188,9 @@ def run_gsm8k_eval(task, tokenizer, engine,
     In a distributed setting, all ranks cooperate but this function will NOT
     do the reduction across ranks. This is the responsibility of the caller.
     Because the evaluation can take a while, this function will yield records one by one.
+
+    Beginner note: "pass@k" = the fraction of questions where at least one of k sampled answers
+    is correct. pass@1 is plain accuracy.
     """
     max_examples = min(max_examples, len(task)) if max_examples is not None else len(task)
     for idx in range(ddp_rank, max_examples, ddp_world_size):
@@ -261,6 +293,7 @@ for step in range(num_steps):
             rewards = rewards_all[b0:b1]
             advantages = advantages_all[b0:b1]
             # Calculate log probabilities. Note that the loss calculates NLL = -logp, so we negate
+            # (NLL = "negative log likelihood", which is exactly what cross-entropy computes per token)
             logp = -model(inputs, targets, loss_reduction='none').view_as(inputs) # (B, T)
             # Calculate the PG objective. Note that ignore_index=-1 ensures that invalid tokens have loss 0.
             pg_obj = (logp * advantages.unsqueeze(-1)).sum()

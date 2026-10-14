@@ -23,6 +23,14 @@ def evaluate_bpb(model, batches, steps, token_bytes):
     In addition to evaluate_loss, we need the token_bytes tensor:
     It is a 1D tensor of shape (vocab_size,), indicating the number of bytes for
     each token id, or 0 if the token is to not be counted (e.g. special tokens).
+
+    Beginner note on units: the cross-entropy loss uses the natural log, so it is measured in
+    "nats". Dividing by ln(2) converts nats to "bits" (log base 2). Bits per byte then means:
+    on average, how many yes/no questions would you need to guess each byte of the text, given
+    the model's predictions? Lower = the model finds the text more predictable = better model.
+    Why not just compare losses? A tokenizer with bigger tokens makes fewer, harder predictions,
+    so per-token loss isn't comparable across tokenizers, but per-byte is.
+    Background on information/bits: https://en.wikipedia.org/wiki/Entropy_(information_theory)
     """
     # record the losses
     total_nats = torch.tensor(0.0, dtype=torch.float32, device=model.get_device())

@@ -2,6 +2,9 @@
 SmolTalk by HuggingFace. Good "general" conversational dataset.
 https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk
 We use the "smol" version, which is more appropriate for smaller models.
+
+Beginner note: these are general-purpose chat conversations (questions, writing, advice...). In SFT
+they teach the model the overall "helpful assistant" conversational style.
 """
 
 from tasks.common import Task, load_hub_dataset

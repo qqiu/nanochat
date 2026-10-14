@@ -19,6 +19,11 @@ What is not covered:
 
 Overall this sandbox is good for evaluation of generated code and protects against
 accidental destructive behavior, but it is not safe against malicious adversarial code.
+
+Beginner note: this is used to grade coding tasks (see tasks/humaneval.py): the model writes a
+Python function, we run it together with some test cases, and check whether the tests pass.
+Because the code is written by a model, it could do anything (delete files, loop forever...),
+which is why it runs in a separate, restricted process with a time limit.
 """
 
 import subprocess

@@ -6,6 +6,11 @@ code lives in nanochat directory and is imported from here.
 Example runs:
 python -m scripts.chat_eval -i sft -a ARC-Easy
 torchrun --nproc_per_node=8 -m scripts.chat_eval -- -i sft -a ARC-Easy
+
+Beginner note: this evaluates a chat (fine-tuned) model on benchmarks from the tasks/ folder.
+Multiple-choice tasks (ARC, MMLU) are scored "categorically" by comparing the model's scores for the
+answer letters; free-form tasks (GSM8K, HumanEval) are scored "generatively" by letting the model
+write an answer and checking it. ChatCORE is the average of these, centered so random guessing = 0.
 """
 
 import argparse

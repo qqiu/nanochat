@@ -3,6 +3,17 @@ Base class for all Tasks.
 A Task is basically a dataset of conversations, together with some
 metadata and often also evaluation criteria.
 Example tasks: MMLU, ARC-Easy, ARC-Challenge, GSM8K, HumanEval, SmolTalk.
+
+Beginner note: in this project a "task" is how we package both training data and benchmarks.
+Each task returns examples as conversations, e.g.
+    {"messages": [{"role": "user", "content": "What is 2+2?"},
+                  {"role": "assistant", "content": "4"}]}
+and many tasks can also grade a model's answer (evaluate()). There are two kinds of evaluation:
+- "categorical": multiple choice (A/B/C/D); we check which letter the model rates most likely.
+- "generative": the model writes a free-form answer that we then check (e.g. the final number
+  of a math problem, or whether generated code passes its tests).
+The datasets are downloaded from the Hugging Face Hub (https://huggingface.co/datasets),
+the most popular place to share ML datasets.
 """
 
 import os
